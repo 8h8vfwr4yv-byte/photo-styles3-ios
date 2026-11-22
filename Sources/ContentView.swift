@@ -72,11 +72,11 @@ enum StyleEngine {
                 curve.inputImage = img
                 let lift = CGFloat(0.055 * k)
                 let roll = CGFloat(1.0 - 0.05 * k)
-                curve.point0 = CIVector(x: 0, y: lift)
-                curve.point1 = CIVector(x: 0.25, y: 0.25 + lift * 0.55)
-                curve.point2 = CIVector(x: 0.5, y: 0.5)
-                curve.point3 = CIVector(x: 0.75, y: 0.75 - (1 - roll) * 0.4)
-                curve.point4 = CIVector(x: 1, y: roll)
+                curve.point0 = CGPoint(x: 0, y: lift)
+                curve.point1 = CGPoint(x: 0.25, y: 0.25 + lift * 0.55)
+                curve.point2 = CGPoint(x: 0.5, y: 0.5)
+                curve.point3 = CGPoint(x: 0.75, y: 0.75 - (1 - roll) * 0.4)
+                curve.point4 = CGPoint(x: 1, y: roll)
                 img = curve.outputImage ?? img
 
                 let warm = CIFilter.colorControls()
