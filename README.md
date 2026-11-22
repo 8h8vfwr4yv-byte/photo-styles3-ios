@@ -14,7 +14,7 @@
 
 ## 构建
 
-GitHub Actions 使用 Xcode 27.2 / iOS 27.2 SDK（`xcode-27` runner）构建未签名 IPA，最低系统 iOS 17.0。
+GitHub Actions 使用 Xcode 27.2 / iOS 27.2 SDK（`xcode-27` runner）构建未签名 IPA，最低系统 iOS 26.0。
 
 ## 安装
 
