@@ -2,134 +2,270 @@ import SwiftUI
 import PhotosUI
 import Photos
 import CoreImage
-import CoreImage.CIFilterBuiltins
+import ImageIO
 
-// MARK: - iPhone 18 Pro 摄影风格 3（Photographic Styles 3）模拟
-// 风格 3 的新东西：Texture 质感（标准 / 柔肤 / 光晕 / 胶片）+ Grain 颗粒开关，
-// 叠加在原有的色调（Tone）/ 色彩（Color）调色板之上。
-// 本 App 用 Core Image 后期模拟这套效果；原机是在拍摄管线里结合场景语义算的，效果接近但不完全相同。
+// MARK: - 18 Pro 影像
+// 不是相框、不是加个文字边框，而是把整张照片处理成"像新一代相机系统拍出来的"画面：
+// 冷色科技调色 + 高级动态范围 + 镜头镀膜反光 + 轻微胶片颗粒，
+// 再把半透明的设备信息叠层和极简水印直接合成进画面。
 
-enum TextureKind: String, CaseIterable, Identifiable {
-    case standard = "标准"
-    case softSkin = "柔肤"
-    case glow = "光晕"
-    case film = "胶片"
-    var id: String { rawValue }
+struct ImagingStyle: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let desc: String
+    var cool: Double        // 冷色程度 0...1
+    var hdr: Double         // 动态范围 0...1
+    var flare: Double       // 镀膜反光 0...1
+    var grain: Double       // 颗粒 0...1
+    var filmCurve: Double   // 胶片曲线 0...1
+
+    static let all: [ImagingStyle] = [
+        ImagingStyle(id: "standard", name: "标准影像", desc: "均衡的 18 Pro 出厂质感",
+                     cool: 0.35, hdr: 0.55, flare: 0.15, grain: 0.25, filmCurve: 0.0),
+        ImagingStyle(id: "cyber", name: "冷色科技", desc: "冷调、高动态、带镀膜辉光",
+                     cool: 0.85, hdr: 0.8, flare: 0.5, grain: 0.2, filmCurve: 0.0),
+        ImagingStyle(id: "coating", name: "镀膜幻彩", desc: "镜头镀膜的彩色反光是主角",
+                     cool: 0.45, hdr: 0.5, flare: 1.0, grain: 0.15, filmCurve: 0.0),
+        ImagingStyle(id: "film", name: "胶片纪实", desc: "胶片曲线 + 明显颗粒",
+                     cool: 0.15, hdr: 0.45, flare: 0.0, grain: 0.8, filmCurve: 0.8)
+    ]
 }
 
-struct StyleSettings: Equatable {
-    var tone: Double = 0          // -50 ... 50
-    var color: Double = 0         // -50 ... 50
-    var texture: TextureKind = .film
-    var textureIntensity: Double = 60   // 0 ... 100
-    var grain: Bool = true
+struct OverlayInfo {
+    var dateText: String
+    var resolutionText: String
 }
 
-enum StyleEngine {
+enum ImagingEngine {
     static let context = CIContext(options: [.useSoftwareRenderer: false])
 
-    static func apply(_ input: CIImage, settings s: StyleSettings) -> CIImage {
+    static func grade(_ input: CIImage, style: ImagingStyle, intensity: Double) -> CIImage {
         var img = input
         let extent = input.extent
+        let k = intensity
 
-        // 1) 调色板：色调 / 色彩
-        let controls = CIFilter.colorControls()
-        controls.inputImage = img
-        controls.saturation = Float(1.0 + s.color / 100.0 * 0.55)
-        controls.contrast = Float(1.0 + (-s.tone) / 100.0 * 0.22)
-        controls.brightness = Float(s.tone / 100.0 * 0.06)
-        img = controls.outputImage ?? img
-
-        let temp = CIFilter.temperatureAndTint()
-        temp.inputImage = img
-        temp.neutral = CIVector(x: 6500 + CGFloat(s.color) * 14.0, y: 0)
-        temp.targetNeutral = CIVector(x: 6500, y: 0)
-        img = temp.outputImage ?? img
-
-        // 2) 质感 Texture
-        let k = s.textureIntensity / 100.0
-        if k > 0.01 {
-            switch s.texture {
-            case .standard:
-                break
-            case .softSkin:
-                // 柔肤：高斯柔化后低透明叠回，磨皮但保留整体锐度观感
-                if let blurred = blur(img, radius: 5.0 * k + 1.0),
-                   let blended = blend(blurred, over: img, alpha: 0.42 * k) {
-                    img = blended.cropped(to: extent)
-                }
-            case .glow:
-                // 光晕：大半径模糊用滤色模式叠加，高光发光
-                if let blurred = blur(img, radius: 16.0 * k + 2.0) {
-                    let screen = CIFilter.screenBlendMode()
-                    screen.inputImage = withAlpha(blurred, alpha: 0.5 * k)
-                    screen.backgroundImage = img
-                    img = (screen.outputImage ?? img).cropped(to: extent)
-                }
-            case .film:
-                // 胶片：抬黑场、压高光的曲线 + 轻微暖调降饱和
-                let curve = CIFilter.toneCurve()
-                curve.inputImage = img
-                let lift = CGFloat(0.055 * k)
-                let roll = CGFloat(1.0 - 0.05 * k)
-                curve.point0 = CGPoint(x: 0, y: lift)
-                curve.point1 = CGPoint(x: 0.25, y: 0.25 + lift * 0.55)
-                curve.point2 = CGPoint(x: 0.5, y: 0.5)
-                curve.point3 = CGPoint(x: 0.75, y: 0.75 - (1 - roll) * 0.4)
-                curve.point4 = CGPoint(x: 1, y: roll)
-                img = curve.outputImage ?? img
-
-                let warm = CIFilter.colorControls()
-                warm.inputImage = img
-                warm.saturation = Float(1.0 - 0.10 * k)
-                img = warm.outputImage ?? img
-            }
+        // 高级动态范围：压高光、提暗部，再过一条温和的 S 曲线
+        if style.hdr > 0.01, let f = CIFilter(name: "CIHighlightShadowAdjust") {
+            f.setValue(img, forKey: kCIInputImageKey)
+            f.setValue(NSNumber(value: -0.55 * style.hdr * k), forKey: "inputHighlightAmount")
+            f.setValue(NSNumber(value: 0.55 * style.hdr * k), forKey: "inputShadowAmount")
+            img = f.outputImage ?? img
+        }
+        if let curve = CIFilter(name: "CIToneCurve") {
+            let c = 0.06 * k
+            curve.setValue(img, forKey: kCIInputImageKey)
+            curve.setValue(CIVector(x: 0, y: 0), forKey: "inputPoint0")
+            curve.setValue(CIVector(x: 0.25, y: 0.25 - c * 0.5), forKey: "inputPoint1")
+            curve.setValue(CIVector(x: 0.5, y: 0.5), forKey: "inputPoint2")
+            curve.setValue(CIVector(x: 0.75, y: 0.75 + c * 0.5), forKey: "inputPoint3")
+            curve.setValue(CIVector(x: 1, y: 1), forKey: "inputPoint4")
+            img = curve.outputImage ?? img
         }
 
-        // 3) 颗粒 Grain（风格 3 里是开关，没有强度滑杆，这里同样处理）
-        if s.grain {
-            let noise = CIFilter.randomGenerator().outputImage?.cropped(to: extent)
-            if let noise {
-                let mono = CIFilter.colorMonochrome()
-                mono.inputImage = noise
-                mono.color = CIColor(red: 0.5, green: 0.5, blue: 0.5)
-                mono.intensity = 1.0
-                if let grainImg = mono.outputImage {
-                    let soft = CIFilter.softLightBlendMode()
-                    soft.inputImage = withAlpha(grainImg, alpha: 0.16)
-                    soft.backgroundImage = img
-                    img = (soft.outputImage ?? img).cropped(to: extent)
-                }
-            }
+        // 冷色科技调色：整体往冷端推，饱和略收、对比略升
+        if style.cool > 0.01, let temp = CIFilter(name: "CITemperatureAndTint") {
+            temp.setValue(img, forKey: kCIInputImageKey)
+            temp.setValue(CIVector(x: CGFloat(6500 - 1500 * style.cool * k), y: 0), forKey: "inputNeutral")
+            temp.setValue(CIVector(x: 6500, y: 0), forKey: "inputTargetNeutral")
+            img = temp.outputImage ?? img
+        }
+        if let cc = CIFilter(name: "CIColorControls") {
+            cc.setValue(img, forKey: kCIInputImageKey)
+            cc.setValue(NSNumber(value: 1.0 - 0.06 * style.cool * k + 0.04 * k), forKey: kCIInputSaturationKey)
+            cc.setValue(NSNumber(value: 1.0 + 0.07 * k), forKey: kCIInputContrastKey)
+            img = cc.outputImage ?? img
+        }
+
+        // 胶片曲线（胶片纪实）
+        if style.filmCurve > 0.01, let curve = CIFilter(name: "CIToneCurve") {
+            let lift = 0.05 * style.filmCurve * k
+            curve.setValue(img, forKey: kCIInputImageKey)
+            curve.setValue(CIVector(x: 0, y: CGFloat(lift)), forKey: "inputPoint0")
+            curve.setValue(CIVector(x: 0.25, y: CGFloat(0.25 + lift * 0.5)), forKey: "inputPoint1")
+            curve.setValue(CIVector(x: 0.5, y: 0.5), forKey: "inputPoint2")
+            curve.setValue(CIVector(x: 0.75, y: 0.73), forKey: "inputPoint3")
+            curve.setValue(CIVector(x: 1, y: CGFloat(1.0 - 0.04 * style.filmCurve * k)), forKey: "inputPoint4")
+            img = curve.outputImage ?? img
+        }
+
+        // 镜头镀膜反光：两团彩色辉光（青品 + 绿）+ 一道很淡的斜向耀光，滤色叠加
+        if style.flare > 0.01 {
+            img = addFlare(img, extent: extent, amount: style.flare * k)
+        }
+
+        // 清晰度：轻微锐化，模拟新传感器细节
+        if let sharp = CIFilter(name: "CIUnsharpMask") {
+            sharp.setValue(img, forKey: kCIInputImageKey)
+            sharp.setValue(NSNumber(value: 0.45 * k), forKey: kCIInputIntensityKey)
+            sharp.setValue(NSNumber(value: 1.6), forKey: kCIInputRadiusKey)
+            img = sharp.outputImage ?? img
+        }
+
+        // 轻微胶片颗粒
+        if style.grain > 0.01 {
+            img = addGrain(img, extent: extent, amount: style.grain * k)
         }
 
         return img.cropped(to: extent)
     }
 
-    private static func blur(_ img: CIImage, radius: Double) -> CIImage? {
-        let f = CIFilter.gaussianBlur()
-        f.inputImage = img
-        f.radius = Float(radius)
-        return f.outputImage?.cropped(to: img.extent)
+    private static func addFlare(_ img: CIImage, extent: CGRect, amount: Double) -> CIImage {
+        var base = img
+        let w = extent.width, h = extent.height
+        // 主辉光：右上方，青→品红的镀膜色
+        if let glow = radialGlow(center: CIVector(x: extent.minX + w * 0.78, y: extent.minY + h * 0.80),
+                                 radius: max(w, h) * 0.55,
+                                 color: CIColor(red: 0.45, green: 0.75, blue: 1.0, alpha: CGFloat(0.30 * amount)),
+                                 extent: extent) {
+            base = screenBlend(glow, over: base)
+        }
+        // 副辉光：左下方，较小的绿色鬼影
+        if let ghost = radialGlow(center: CIVector(x: extent.minX + w * 0.24, y: extent.minY + h * 0.22),
+                                  radius: max(w, h) * 0.30,
+                                  color: CIColor(red: 0.55, green: 1.0, blue: 0.70, alpha: CGFloat(0.16 * amount)),
+                                  extent: extent) {
+            base = screenBlend(ghost, over: base)
+        }
+        // 斜向耀光带
+        if let grad = CIFilter(name: "CILinearGradient") {
+            grad.setValue(CIVector(x: extent.minX, y: extent.maxY), forKey: "inputPoint0")
+            grad.setValue(CIVector(x: extent.maxX, y: extent.minY), forKey: "inputPoint1")
+            grad.setValue(CIColor(red: 1, green: 0.85, blue: 0.95, alpha: CGFloat(0.05 * amount)), forKey: "inputColor0")
+            grad.setValue(CIColor(red: 1, green: 0.85, blue: 0.95, alpha: 0), forKey: "inputColor1")
+            if let streak = grad.outputImage?.cropped(to: extent) {
+                base = screenBlend(streak, over: base)
+            }
+        }
+        return base.cropped(to: extent)
     }
 
-    private static func withAlpha(_ img: CIImage, alpha: Double) -> CIImage {
-        let m = CIFilter.colorMatrix()
-        m.inputImage = img
-        m.aVector = CIVector(x: 0, y: 0, z: 0, w: CGFloat(alpha))
-        return m.outputImage ?? img
+    private static func radialGlow(center: CIVector, radius: CGFloat, color: CIColor, extent: CGRect) -> CIImage? {
+        guard let f = CIFilter(name: "CIRadialGradient") else { return nil }
+        f.setValue(center, forKey: kCIInputCenterKey)
+        f.setValue(NSNumber(value: 0.0), forKey: "inputRadius0")
+        f.setValue(NSNumber(value: radius), forKey: "inputRadius1")
+        f.setValue(color, forKey: "inputColor0")
+        f.setValue(CIColor(red: color.red, green: color.green, blue: color.blue, alpha: 0), forKey: "inputColor1")
+        return f.outputImage?.cropped(to: extent)
     }
 
-    private static func blend(_ fg: CIImage, over bg: CIImage, alpha: Double) -> CIImage? {
-        let over = CIFilter.sourceOverCompositing()
-        over.inputImage = withAlpha(fg, alpha: alpha)
-        over.backgroundImage = bg
-        return over.outputImage
+    private static func screenBlend(_ fg: CIImage, over bg: CIImage) -> CIImage {
+        guard let f = CIFilter(name: "CIScreenBlendMode") else { return bg }
+        f.setValue(fg, forKey: kCIInputImageKey)
+        f.setValue(bg, forKey: kCIInputBackgroundImageKey)
+        return f.outputImage ?? bg
     }
 
-    static func renderUIImage(_ ciImage: CIImage) -> UIImage? {
-        guard let cg = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
-        return UIImage(cgImage: cg)
+    private static func addGrain(_ img: CIImage, extent: CGRect, amount: Double) -> CIImage {
+        guard let noise = CIFilter(name: "CIRandomGenerator")?.outputImage?.cropped(to: extent),
+              let mono = CIFilter(name: "CIColorMonochrome") else { return img }
+        mono.setValue(noise, forKey: kCIInputImageKey)
+        mono.setValue(CIColor(red: 0.5, green: 0.5, blue: 0.5), forKey: "inputColor")
+        mono.setValue(NSNumber(value: 1.0), forKey: kCIInputIntensityKey)
+        guard let grainImg = mono.outputImage,
+              let matrix = CIFilter(name: "CIColorMatrix") else { return img }
+        matrix.setValue(grainImg, forKey: kCIInputImageKey)
+        matrix.setValue(CIVector(x: 0, y: 0, z: 0, w: CGFloat(0.05 + 0.13 * amount)), forKey: "inputAVector")
+        guard let faint = matrix.outputImage,
+              let soft = CIFilter(name: "CISoftLightBlendMode") else { return img }
+        soft.setValue(faint, forKey: kCIInputImageKey)
+        soft.setValue(img, forKey: kCIInputBackgroundImageKey)
+        return (soft.outputImage ?? img).cropped(to: extent)
+    }
+
+    static func renderCG(_ ciImage: CIImage) -> CGImage? {
+        context.createCGImage(ciImage, from: ciImage.extent)
+    }
+
+    // MARK: 设备信息叠层 + 极简水印（直接合成进画面）
+
+    static func compositeOverlay(_ image: UIImage, info: OverlayInfo, showOverlay: Bool, showWatermark: Bool) -> UIImage {
+        guard showOverlay || showWatermark else { return image }
+        let size = image.size
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        return renderer.image { ctx in
+            image.draw(at: .zero)
+            let u = size.width / 1200.0          // 相对单位，任意分辨率下比例一致
+            let margin = 42 * u
+            let white = UIColor.white
+
+            if showOverlay {
+                // 顶部设备信息条：半透明芯片
+                let chipText = "iPhone 18 Pro · 48MP Fusion"
+                let chipFont = UIFont.monospacedSystemFont(ofSize: 30 * u, weight: .medium)
+                let chipAttrs: [NSAttributedString.Key: Any] = [.font: chipFont, .foregroundColor: white.withAlphaComponent(0.92)]
+                let chipSize = (chipText as NSString).size(withAttributes: chipAttrs)
+                let chipRect = CGRect(x: margin, y: margin, width: chipSize.width + 36 * u, height: chipSize.height + 22 * u)
+                ctx.cgContext.setFillColor(UIColor.black.withAlphaComponent(0.20).cgColor)
+                UIBezierPath(roundedRect: chipRect, cornerRadius: chipRect.height / 2).fill()
+                (chipText as NSString).draw(at: CGPoint(x: chipRect.minX + 18 * u, y: chipRect.minY + 11 * u), withAttributes: chipAttrs)
+
+                // 右上角状态点
+                let dotR = 9 * u
+                ctx.cgContext.setFillColor(UIColor.systemGreen.withAlphaComponent(0.9).cgColor)
+                ctx.cgContext.fillEllipse(in: CGRect(x: size.width - margin - dotR * 2, y: margin + 6 * u, width: dotR * 2, height: dotR * 2))
+
+                // 四角取景框线（相机 HUD，不是相框）
+                ctx.cgContext.setStrokeColor(white.withAlphaComponent(0.55).cgColor)
+                ctx.cgContext.setLineWidth(3.2 * u)
+                let L = 54 * u
+                let inset = 26 * u
+                let corners: [(CGPoint, CGFloat, CGFloat)] = [
+                    (CGPoint(x: inset, y: inset), 1, 1),
+                    (CGPoint(x: size.width - inset, y: inset), -1, 1),
+                    (CGPoint(x: inset, y: size.height - inset), 1, -1),
+                    (CGPoint(x: size.width - inset, y: size.height - inset), -1, -1)
+                ]
+                for (p, sx, sy) in corners {
+                    ctx.cgContext.move(to: CGPoint(x: p.x + L * sx, y: p.y))
+                    ctx.cgContext.addLine(to: p)
+                    ctx.cgContext.addLine(to: CGPoint(x: p.x, y: p.y + L * sy))
+                }
+                ctx.cgContext.strokePath()
+
+                // 底部左侧：拍摄参数行（日期取自照片 EXIF，其余为该影像系统的标志参数）
+                let infoText = "\(info.dateText)  ·  24mm  ƒ/1.6  ISO 50"
+                let infoFont = UIFont.monospacedSystemFont(ofSize: 27 * u, weight: .regular)
+                let infoAttrs: [NSAttributedString.Key: Any] = [.font: infoFont, .foregroundColor: white.withAlphaComponent(0.85)]
+                (infoText as NSString).draw(at: CGPoint(x: margin, y: size.height - margin - 30 * u), withAttributes: infoAttrs)
+            }
+
+            if showWatermark {
+                // 底部右侧极简水印
+                let wm = "18 PRO IMAGING"
+                let wmFont = UIFont.systemFont(ofSize: 26 * u, weight: .semibold)
+                let wmAttrs: [NSAttributedString.Key: Any] = [
+                    .font: wmFont,
+                    .foregroundColor: white.withAlphaComponent(0.62),
+                    .kern: 4.5 * u
+                ]
+                let wmSize = (wm as NSString).size(withAttributes: wmAttrs)
+                (wm as NSString).draw(at: CGPoint(x: size.width - margin - wmSize.width, y: size.height - margin - 30 * u), withAttributes: wmAttrs)
+            }
+        }
+    }
+
+    static func overlayInfo(for data: Data, ciImage: CIImage) -> OverlayInfo {
+        var dateText = ""
+        if let src = CGImageSourceCreateWithData(data as CFData, nil),
+           let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any],
+           let exif = props[kCGImagePropertyExifDictionary as String] as? [String: Any],
+           let raw = exif[kCGImagePropertyExifDateTimeOriginal as String] as? String {
+            // EXIF 格式 "2026:11:22 14:32:05" → "2026.11.22"
+            let parts = raw.split(separator: " ")
+            if let d = parts.first {
+                dateText = d.replacingOccurrences(of: ":", with: ".")
+            }
+        }
+        if dateText.isEmpty {
+            let f = DateFormatter()
+            f.dateFormat = "yyyy.MM.dd"
+            dateText = f.string(from: Date())
+        }
+        let res = "\(Int(ciImage.extent.width))×\(Int(ciImage.extent.height))"
+        return OverlayInfo(dateText: dateText, resolutionText: res)
     }
 }
 
@@ -137,10 +273,13 @@ enum StyleEngine {
 
 struct ContentView: View {
     @State private var pickerItem: PhotosPickerItem?
-    @State private var originalData: Data?
     @State private var originalCI: CIImage?
+    @State private var info = OverlayInfo(dateText: "", resolutionText: "")
     @State private var preview: UIImage?
-    @State private var settings = StyleSettings()
+    @State private var style: ImagingStyle = ImagingStyle.all[1]
+    @State private var intensity: Double = 0.85
+    @State private var showOverlay = true
+    @State private var showWatermark = true
     @State private var showOriginal = false
     @State private var saving = false
     @State private var savedTip: String?
@@ -151,15 +290,11 @@ struct ContentView: View {
                 VStack(spacing: 18) {
                     photoArea
                     if originalCI != nil {
+                        stylePicker
                         controls
                         saveButton
-                        Text("模拟 iPhone 18 Pro「摄影风格 3」的质感与颗粒（后期处理，与原机拍摄管线效果接近，但不完全相同）。")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 8)
                     } else {
-                        Text("选一张老机型拍的照片，给它加上 iPhone 18 Pro 新的影像风格：质感（柔肤 / 光晕 / 胶片）和颗粒，再保存到相册。")
+                        Text("选一张照片，给它换上 iPhone 18 Pro 的影像系统质感：冷色调、高动态范围、镜头镀膜反光和轻颗粒，画面里还会带上半透明的设备信息层。")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -168,7 +303,7 @@ struct ContentView: View {
                 }
                 .padding(16)
             }
-            .navigationTitle("摄影风格 3")
+            .navigationTitle("18 Pro 影像")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -180,7 +315,10 @@ struct ContentView: View {
             .onChange(of: pickerItem) { _, newItem in
                 Task { await load(newItem) }
             }
-            .onChange(of: settings) { _, _ in refreshPreview() }
+            .onChange(of: style) { _, _ in refreshPreview() }
+            .onChange(of: intensity) { _, _ in refreshPreview() }
+            .onChange(of: showOverlay) { _, _ in refreshPreview() }
+            .onChange(of: showWatermark) { _, _ in refreshPreview() }
         }
     }
 
@@ -189,7 +327,7 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color.secondary.opacity(0.10))
             if let preview {
-                Image(uiImage: showOriginal ? (originalCI.flatMap { StyleEngine.renderUIImage($0) } ?? preview) : preview)
+                Image(uiImage: preview)
                     .resizable()
                     .scaledToFit()
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -202,16 +340,16 @@ struct ContentView: View {
                             .font(.headline)
                     }
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 260)
+                    .frame(maxWidth: .infinity, minHeight: 280)
                 }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 260)
+        .frame(maxWidth: .infinity, minHeight: 280)
         .overlay(alignment: .bottomTrailing) {
             if originalCI != nil {
                 Button {
-                    // 按住看原图用手势更顺手，这里用开关切换
                     showOriginal.toggle()
+                    refreshPreview()
                 } label: {
                     Text(showOriginal ? "看效果" : "看原图")
                         .font(.caption.weight(.semibold))
@@ -224,50 +362,57 @@ struct ContentView: View {
         }
     }
 
-    private var controls: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("质感 Texture（风格 3 新增）")
+    private var stylePicker: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("新影像风格")
                 .font(.subheadline.weight(.semibold))
-            Picker("质感", selection: $settings.texture) {
-                ForEach(TextureKind.allCases) { t in
-                    Text(t.rawValue).tag(t)
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                ForEach(ImagingStyle.all) { s in
+                    Button {
+                        style = s
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(s.name)
+                                .font(.headline)
+                            Text(s.desc)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.leading)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(
+                            style.id == s.id ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08),
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(style.id == s.id ? Color.accentColor : .clear, lineWidth: 1.5)
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
             }
-            .pickerStyle(.segmented)
+        }
+    }
 
-            if settings.texture != .standard {
-                HStack {
-                    Text("质感强度")
-                        .font(.subheadline)
-                    Slider(value: $settings.textureIntensity, in: 0...100, step: 1)
-                    Text("\(Int(settings.textureIntensity))")
-                        .font(.subheadline.monospacedDigit())
-                        .frame(width: 30)
-                }
-            }
-
-            Toggle(isOn: $settings.grain) {
-                Text("颗粒 Grain（风格 3 新增）")
-                    .font(.subheadline.weight(.semibold))
-            }
-
-            Divider()
-
+    private var controls: some View {
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("色调")
+                Text("风格强度")
                     .font(.subheadline)
-                Slider(value: $settings.tone, in: -50...50, step: 1)
-                Text("\(Int(settings.tone))")
+                Slider(value: $intensity, in: 0.2...1.0, step: 0.05)
+                Text("\(Int(intensity * 100))%")
                     .font(.subheadline.monospacedDigit())
-                    .frame(width: 30)
+                    .frame(width: 44)
             }
-            HStack {
-                Text("色彩")
+            Toggle(isOn: $showOverlay) {
+                Text("设备信息叠层")
                     .font(.subheadline)
-                Slider(value: $settings.color, in: -50...50, step: 1)
-                Text("\(Int(settings.color))")
-                    .font(.subheadline.monospacedDigit())
-                    .frame(width: 30)
+            }
+            Toggle(isOn: $showWatermark) {
+                Text("极简水印")
+                    .font(.subheadline)
             }
         }
         .padding(14)
@@ -279,18 +424,12 @@ struct ContentView: View {
             Button {
                 Task { await save() }
             } label: {
-                if saving {
-                    Label("保存中…", systemImage: "hourglass")
-                        .frame(maxWidth: .infinity)
-                } else {
-                    Label("保存到相册", systemImage: "square.and.arrow.down")
-                        .frame(maxWidth: .infinity)
-                }
+                Label(saving ? "保存中…" : "保存到相册", systemImage: saving ? "hourglass" : "square.and.arrow.down")
+                    .frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)
             .controlSize(.large)
             .disabled(saving)
-
             if let savedTip {
                 Text(savedTip)
                     .font(.caption)
@@ -307,22 +446,35 @@ struct ContentView: View {
         showOriginal = false
         if let data = try? await item.loadTransferable(type: Data.self),
            let ci = CIImage(data: data, options: [.applyOrientationProperty: true]) {
-            originalData = data
             originalCI = ci
+            info = ImagingEngine.overlayInfo(for: data, ciImage: ci)
             refreshPreview()
         }
     }
 
+    private func currentRender(from ci: CIImage, maxSide: CGFloat?) -> UIImage? {
+        var src = ci
+        if let maxSide {
+            let scale = min(1.0, maxSide / max(ci.extent.width, ci.extent.height))
+            if scale < 1.0 {
+                src = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            }
+        }
+        if showOriginal {
+            guard let cg = ImagingEngine.renderCG(src) else { return nil }
+            return UIImage(cgImage: cg)
+        }
+        let graded = ImagingEngine.grade(src, style: style, intensity: intensity)
+        guard let cg = ImagingEngine.renderCG(graded) else { return nil }
+        let base = UIImage(cgImage: cg)
+        return ImagingEngine.compositeOverlay(base, info: info, showOverlay: showOverlay, showWatermark: showWatermark)
+    }
+
     private func refreshPreview() {
         guard let originalCI else { return }
-        let s = settings
-        // 预览用缩小图，滑动滑杆才跟手
-        let maxSide: CGFloat = 1100
-        let scale = min(1.0, maxSide / max(originalCI.extent.width, originalCI.extent.height))
-        let small = originalCI.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let snapshot = originalCI
         DispatchQueue.global(qos: .userInitiated).async {
-            let out = StyleEngine.apply(small, settings: s)
-            let ui = StyleEngine.renderUIImage(out)
+            let ui = currentRender(from: snapshot, maxSide: 1100)
             DispatchQueue.main.async { preview = ui }
         }
     }
@@ -331,11 +483,11 @@ struct ContentView: View {
         guard let originalCI else { return }
         saving = true
         savedTip = nil
-        let s = settings
-        let full = await Task.detached(priority: .userInitiated) {
-            StyleEngine.apply(originalCI, settings: s)
+        let snapshot = originalCI
+        let rendered = await Task.detached(priority: .userInitiated) {
+            self.currentRender(from: snapshot, maxSide: nil)
         }.value
-        guard let image = StyleEngine.renderUIImage(full) else {
+        guard let image = rendered else {
             saving = false
             savedTip = "处理失败，换一张照片试试"
             return

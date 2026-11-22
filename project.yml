@@ -15,7 +15,7 @@ targets:
         PRODUCT_NAME: PhotoStyles3
         GENERATE_INFOPLIST_FILE: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        INFOPLIST_KEY_CFBundleDisplayName: 摄影风格3
+        INFOPLIST_KEY_CFBundleDisplayName: 18 Pro 影像
         INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: 把处理好的照片保存到相册。
         INFOPLIST_KEY_UILaunchStoryboardName: ""
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
