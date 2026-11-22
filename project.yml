@@ -2,7 +2,7 @@ name: PhotoStyles3
 options:
   bundleIdPrefix: com.muse
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "26.0"
 targets:
   PhotoStyles3:
     type: application
